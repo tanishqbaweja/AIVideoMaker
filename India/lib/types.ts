@@ -47,6 +47,9 @@ export type TtsGenerationDiagnostic = {
   providerAttemptCount: number;
   timeoutRecoveryCount: number;
   providerAttemptElapsedSeconds: number[];
+  transcriptCoverage?: number;
+  transcriptMatchedScriptWords?: number;
+  transcriptScriptWordCount?: number;
 };
 
 export type SceneVideoAsset = {

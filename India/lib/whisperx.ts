@@ -117,7 +117,6 @@ export async function alignSegmentsWithWhisperX({
 
   const fullAudioWords = await alignFullAudioWithWhisperX({
     audioFilePath,
-    segments,
     approxWords,
     keywordSet,
     tmpDir,
@@ -445,20 +444,22 @@ async function extractAudioChunk({
 
 async function alignFullAudioWithWhisperX({
   audioFilePath,
-  segments,
   approxWords,
   keywordSet,
   tmpDir,
   totalDuration
 }: {
   audioFilePath: string;
-  segments: CorrectedTranscriptSegment[];
   approxWords: ApproxTranscriptWord[];
   keywordSet: Set<string>;
   tmpDir: string;
   totalDuration: number;
 }) {
   try {
+    const fullScriptText = [...approxWords]
+      .sort((left, right) => left.scriptIndex - right.scriptIndex)
+      .map((word) => word.word)
+      .join(" ");
     const results = await runWhisperXJobs(
       [
         {
@@ -466,7 +467,13 @@ async function alignFullAudioWithWhisperX({
           audioFile: audioFilePath,
           offset: 0,
           timeScale: 1,
-          segments
+          segments: [
+            {
+              start: 0,
+              end: totalDuration,
+              text: fullScriptText
+            }
+          ]
         }
       ],
       tmpDir,

@@ -51,6 +51,35 @@ export type TimedSegment = {
   text: string;
 };
 
+export type TextAlignmentCoverage = {
+  referenceWordCount: number;
+  candidateWordCount: number;
+  matchedWordCount: number;
+  referenceCoverage: number;
+  candidateCoverage: number;
+};
+
+export function getTextAlignmentCoverage(
+  referenceText: string,
+  candidateText: string
+): TextAlignmentCoverage {
+  const referenceTokens = tokenizeWords(referenceText);
+  const candidateTokens = tokenizeWords(candidateText);
+  const matchedWordCount = buildExactAlignmentMap(referenceTokens, candidateTokens).size;
+
+  return {
+    referenceWordCount: referenceTokens.length,
+    candidateWordCount: candidateTokens.length,
+    matchedWordCount,
+    referenceCoverage: referenceTokens.length > 0
+      ? matchedWordCount / referenceTokens.length
+      : 0,
+    candidateCoverage: candidateTokens.length > 0
+      ? matchedWordCount / candidateTokens.length
+      : 0
+  };
+}
+
 export function correctTimedSegmentsToScript(segments: TimedSegment[], scriptText: string) {
   const scriptTokens = tokenizeWords(scriptText);
   if (scriptTokens.length === 0 || segments.length === 0) {

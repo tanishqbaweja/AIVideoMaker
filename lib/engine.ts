@@ -9,7 +9,11 @@ import {
   prepareFullAudioForAlignment
 } from "@/lib/ffmpeg";
 import { generateScriptPayload, generateTtsAudio } from "@/lib/gemini";
-import { getCorrectedTranscript } from "@/lib/groq";
+import {
+  getCorrectedTranscript,
+  MIN_TRANSCRIPT_SCRIPT_COVERAGE,
+  type CorrectedTranscript
+} from "@/lib/groq";
 import { completeJob, failJob, getJob, markCleaned, markStep, setPayload, setTmpDir } from "@/lib/jobs";
 import { fetchAndDownloadPexelsVideos } from "@/lib/pexels";
 import { tokenizeWords, normalizeWord } from "@/lib/text";
@@ -69,6 +73,8 @@ export async function runGenerationJob(jobId: string) {
 
     const ttsDiagnosticsHistory: NonNullable<EnginePayload["ttsDiagnostics"]> = [];
     let alignmentAudioPath = "";
+    let rawAudioDuration = 0;
+    let correctedTranscript: CorrectedTranscript | null = null;
 
     for (let ttsAttempt = 1; ttsAttempt <= TTS_REGEN_MAX_ATTEMPTS; ttsAttempt += 1) {
       payload = cloneBasePayload(basePayload);
@@ -83,7 +89,7 @@ export async function runGenerationJob(jobId: string) {
         "running",
         ttsAttempt === 1
           ? "Generating one continuous Gemini voiceover track."
-          : `Regenerating Gemini TTS after excessive internal silence (attempt ${ttsAttempt}/${TTS_REGEN_MAX_ATTEMPTS}).`
+          : `Regenerating Gemini TTS after failed audio validation (attempt ${ttsAttempt}/${TTS_REGEN_MAX_ATTEMPTS}).`
       );
 
       const ttsResult = await withOverloadRetry(
@@ -114,13 +120,6 @@ export async function runGenerationJob(jobId: string) {
         `(${ttsResult.providerAttemptCount} provider attempt(s), ${ttsResult.timeoutRecoveryCount} timeout recovery wait(s)).`
       );
       setPayload(jobId, payload);
-      markStep(
-        jobId,
-        "gemini-tts",
-        "completed",
-        `Continuous Gemini TTS audio generated in ${ttsResult.elapsedSeconds}s ` +
-          `(${ttsResult.providerAttemptCount} provider attempt(s), ${ttsResult.timeoutRecoveryCount} timeout recovery wait(s)).`
-      );
 
       const sourceDuration = await getMediaDuration(payload.audioFilePath);
       const silenceRanges = await detectSilenceRanges(
@@ -153,27 +152,78 @@ export async function runGenerationJob(jobId: string) {
       }
 
       alignmentAudioPath = await prepareFullAudioForAlignment({ payload, tmpDir });
+      rawAudioDuration = await getMediaDuration(alignmentAudioPath);
+      markStep(
+        jobId,
+        "groq-alignment",
+        "running",
+        "Checking natural-speed narration for missing or changed speech."
+      );
+      const candidateTranscript = await withOverloadRetry(
+        () => getCorrectedTranscript({
+          audioFilePath: alignmentAudioPath,
+          scriptText: payload.fullScript,
+          totalDuration: rawAudioDuration
+        }),
+        "Groq transcription"
+      );
+      const scriptCoverage = candidateTranscript.quality.referenceCoverage;
+      const currentTtsDiagnostic = ttsDiagnosticsHistory[ttsDiagnosticsHistory.length - 1];
+      currentTtsDiagnostic.transcriptCoverage = scriptCoverage;
+      currentTtsDiagnostic.transcriptMatchedScriptWords =
+        candidateTranscript.quality.matchedWordCount;
+      currentTtsDiagnostic.transcriptScriptWordCount =
+        candidateTranscript.quality.referenceWordCount;
+      payload.ttsDiagnostics = ttsDiagnosticsHistory.map((diagnostic) => ({
+        ...diagnostic,
+        providerAttemptElapsedSeconds: [...diagnostic.providerAttemptElapsedSeconds]
+      }));
+      setPayload(jobId, payload);
+
+      if (scriptCoverage < MIN_TRANSCRIPT_SCRIPT_COVERAGE) {
+        const coverageDetail =
+          `${(scriptCoverage * 100).toFixed(1)}% ` +
+          `(${candidateTranscript.quality.matchedWordCount}/${candidateTranscript.quality.referenceWordCount} script words)`;
+        console.warn(`[TTS] Narration transcript coverage too low: ${coverageDetail}.`);
+        alignmentAudioPath = "";
+        rawAudioDuration = 0;
+        if (ttsAttempt >= TTS_REGEN_MAX_ATTEMPTS) {
+          throw new Error(
+            `Gemini TTS omitted or changed too much script content on all ${TTS_REGEN_MAX_ATTEMPTS} attempts. ` +
+            `Last transcript coverage: ${coverageDetail}.`
+          );
+        }
+
+        markStep(
+          jobId,
+          "gemini-tts",
+          "running",
+          `Narration covered only ${coverageDetail}. Waiting ${TTS_REGEN_WAIT_MS / 1000}s before TTS attempt ${ttsAttempt + 1}.`
+        );
+        await delay(TTS_REGEN_WAIT_MS);
+        continue;
+      }
+
+      correctedTranscript = candidateTranscript;
+      markStep(
+        jobId,
+        "gemini-tts",
+        "completed",
+        `Continuous Gemini TTS passed silence and transcript validation ` +
+          `(${(scriptCoverage * 100).toFixed(1)}% script coverage).`
+      );
       break;
     }
 
-    if (!alignmentAudioPath) {
-      throw new Error("Gemini TTS did not produce narration that passed silence validation.");
+    if (!alignmentAudioPath || !correctedTranscript) {
+      throw new Error("Gemini TTS did not produce narration that passed silence and transcript validation.");
     }
 
     markStep(
       jobId,
       "groq-alignment",
       "running",
-      "Getting rough Groq segments from natural-speed narration."
-    );
-    const rawAudioDuration = await getMediaDuration(alignmentAudioPath);
-    const correctedTranscript = await withOverloadRetry(
-      () => getCorrectedTranscript({
-        audioFilePath: alignmentAudioPath,
-        scriptText: payload.fullScript,
-        totalDuration: rawAudioDuration
-      }),
-      "Groq transcription"
+      "Running genuine WhisperX alignment on validated natural-speed narration."
     );
 
     let alignmentError: Error | null = null;

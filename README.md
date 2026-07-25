@@ -9,12 +9,12 @@ V-GEN is a local Next.js app that generates short AI videos from a prompt. It us
 - Gemini script generation with dynamic API key failover (supports unlimited backup keys sequentially numbered like `GEMINI_API_KEY_1`, `GEMINI_API_KEY_2`, etc.).
 - Gemini targets exactly 40-45 second videos with 120-150 spoken words and returns tagged narration, scene durations, Pexels search queries, and subtitle highlight keywords.
 - Enforces strict 1-2 word concrete search queries for Pexels to avoid keyword dilution, and mandates a "Subscribe" call-to-action at the end of the script.
-- One Gemini TTS narration call per video using `gemini-3.1-flash-tts-preview` by default, with bracketed audio tags interpreted as performance directions.
+- Gemini TTS uses `gemini-3.1-flash-tts-preview` first and `gemini-2.5-flash-preview-tts` as the per-key fallback, with bracketed audio tags interpreted as performance directions.
 - Video duration automatically adapts to the actual TTS audio length.
 - Resilient 503 overload handling: the pipeline automatically waits 30 seconds and retries up to 5 times for script generation, TTS, and Groq transcription. Gemini 429 rate limits switch to the next configured key.
-- One Groq Whisper `whisper-large-v3-turbo` transcription per video generates rough segment timings from the fitted full TTS audio.
-- Groq rough transcript segments are corrected against the original script before alignment.
-- WhisperX runs locally on CPU to produce accurate word-level subtitle timings from the corrected transcript segments.
+- Groq Whisper `whisper-large-v3-turbo` transcribes the natural-speed TTS without a script prompt. Narration below 85% exact script coverage is rejected and regenerated, preventing omitted speech from becoming mistimed subtitles.
+- Groq rough transcript segments are corrected against the original script for chunk-recovery alignment.
+- WhisperX runs locally on CPU and directly aligns one full-script segment to the natural-speed narration, preventing faulty Groq segment boundaries from distorting word timings.
 - Strict timing sanitization: if WhisperX alignment fails (e.g., words cover <80% of audio or are crammed >6 words/sec), the entire pipeline resets and retries from script generation (up to 3 times) for self-healing.
 - Multiple unique Pexels videos downloaded per scene to avoid visual repetition. Videos are ranked by quality and scaled to fill the target aspect ratio (orientation filtering is bypassed to maximize the video pool).
 - Scene footage is synchronized perfectly using word-level `actualDuration` to guarantee the visuals switch exactly when the corresponding spoken sentence ends.
@@ -123,8 +123,8 @@ Enter a generation prompt, choose the vibe and aspect ratio, then click `COMPILE
 ## Pipeline
 
 1. **Scripting:** Gemini generates an exact 40-45s JSON script (120-150 words) ending with a subscribe call-to-action.
-2. **TTS:** Gemini generates one continuous narration track for the whole script.
-3. **Alignment:** Groq returns rough transcript segments, which are corrected and passed to WhisperX. WhisperX aligns them to the audio.
+2. **TTS:** Gemini generates one continuous narration track. FFmpeg rejects internal silence over 2.5 seconds, and Groq rejects narration with less than 85% script coverage; either failure regenerates only TTS, up to three attempts.
+3. **Alignment:** WhisperX directly aligns the full original script to the validated natural-speed narration. Corrected Groq segments are retained only for chunked recovery if direct alignment fails.
 4. **Sanitization Check:** The pipeline verifies the word timings span the entire audio. If they fail, the UI steps reset and the pipeline restarts from Step 1 (up to 3 times).
 5. **Retrieval:** Multiple unique Pexels videos are downloaded for each scene. Scene durations use word-level `actualDuration` to match the exact narration pacing.
 6. **Assembly:** FFmpeg normalizes clips, mixes background audio, burns centered subtitles, applies a chroma-keyed `sub.mp4` overlay for the last 3 seconds, and exports the final 60fps MP4.
