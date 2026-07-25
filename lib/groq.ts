@@ -1,7 +1,15 @@
 import { createReadStream } from "node:fs";
 import Groq from "groq-sdk";
 import { getRequiredEnv } from "@/lib/env";
-import { correctTimedSegmentsToScript, stripAudioTags, tokenizeWords } from "@/lib/text";
+import {
+  correctTimedSegmentsToScript,
+  getTextAlignmentCoverage,
+  stripAudioTags,
+  tokenizeWords,
+  type TextAlignmentCoverage
+} from "@/lib/text";
+
+export const MIN_TRANSCRIPT_SCRIPT_COVERAGE = 0.85;
 
 type GroqSegment = {
   start: number;
@@ -31,6 +39,7 @@ export type ApproxTranscriptWord = {
 export type CorrectedTranscript = {
   segments: CorrectedTranscriptSegment[];
   words: ApproxTranscriptWord[];
+  quality: TextAlignmentCoverage;
 };
 
 export async function getCorrectedTranscript({
@@ -42,8 +51,22 @@ export async function getCorrectedTranscript({
   scriptText: string;
   totalDuration: number;
 }): Promise<CorrectedTranscript> {
-  const roughSegments = await transcribeRoughSegments(audioFilePath, scriptText);
-  const correctedSegments = roughSegments.length === 0
+  const roughSegments = await transcribeRoughSegments(audioFilePath);
+  const quality = getTextAlignmentCoverage(
+    scriptText,
+    roughSegments.map((segment) => segment.text).join(" ")
+  );
+  const roughSegmentsAreUsable =
+    roughSegments.length > 0
+    && quality.referenceCoverage >= MIN_TRANSCRIPT_SCRIPT_COVERAGE;
+  if (!roughSegmentsAreUsable) {
+    console.warn(
+      `[Groq] Raw transcript covered ${(quality.referenceCoverage * 100).toFixed(1)}% of the script ` +
+      `(${quality.matchedWordCount}/${quality.referenceWordCount} words). Ignoring its segment boundaries.`
+    );
+  }
+
+  const correctedSegments = !roughSegmentsAreUsable
     ? [
       {
         start: 0,
@@ -59,7 +82,8 @@ export async function getCorrectedTranscript({
 
   return {
     segments: correctedSegments,
-    words: expandSegmentsToApproxWords(correctedSegments)
+    words: expandSegmentsToApproxWords(correctedSegments),
+    quality
   };
 }
 
@@ -71,7 +95,7 @@ export async function getCorrectedTranscriptSegments(args: {
   return (await getCorrectedTranscript(args)).segments;
 }
 
-async function transcribeRoughSegments(audioFilePath: string, scriptText: string) {
+async function transcribeRoughSegments(audioFilePath: string) {
   const client = new Groq({ apiKey: getRequiredEnv("GROQ_API_KEY") });
   const transcription = (await client.audio.transcriptions.create({
     file: createReadStream(audioFilePath),
@@ -79,8 +103,7 @@ async function transcribeRoughSegments(audioFilePath: string, scriptText: string
     temperature: 0,
     language: "en",
     response_format: "verbose_json",
-    timestamp_granularities: ["segment"],
-    prompt: buildGroqPrompt(scriptText)
+    timestamp_granularities: ["segment"]
   })) as GroqVerboseTranscription;
 
   return (transcription.segments ?? [])
@@ -91,10 +114,6 @@ async function transcribeRoughSegments(audioFilePath: string, scriptText: string
       text: segment.text.trim()
     }))
     .filter((segment) => segment.end > segment.start && segment.text.length > 0);
-}
-
-function buildGroqPrompt(scriptText: string) {
-  return stripAudioTags(scriptText).slice(0, 224);
 }
 
 function toTime(value: number | undefined) {
