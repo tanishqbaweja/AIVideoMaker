@@ -14,6 +14,10 @@ pnpm-debug.log*
 *.log
 Final_Video/*.mp4
 !Final_Video/.gitkeep
+pdfomni/*.mp4
+pdfomni/last_7_uploads.json
+pdfomni/last_2_uploads.json
+pdfomni/upload.lock
 fact_history/
 token.json
 client_secrets.json

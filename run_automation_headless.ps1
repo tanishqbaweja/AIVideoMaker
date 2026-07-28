@@ -240,6 +240,33 @@ function Invoke-AutomationAttempt {
   return $exitCode
 }
 
+function Invoke-PdfOmniUpload {
+  param(
+    [switch]$ResetLog
+  )
+
+  Write-HeadlessLog `
+    -Message "Local time is between 4:00 PM and 5:00 PM. Running the PDFomni public upload instead of video generation." `
+    -Reset:$ResetLog
+
+  $cmdLine = "python `"scripts/upload_pdf_video.py`" 2>&1"
+  & cmd.exe /d /c $cmdLine | ForEach-Object {
+    if ($ShowProgress) {
+      Write-Host $_.ToString()
+    }
+
+    [System.IO.File]::AppendAllText(
+      $automationLogPath,
+      $_.ToString() + [Environment]::NewLine,
+      $utf8NoBom
+    )
+  }
+
+  $exitCode = $LASTEXITCODE
+  Write-HeadlessLog -Message "PDFomni upload finished with exit code $exitCode."
+  return $exitCode
+}
+
 function Invoke-YouTubeAuthRecovery {
   $popup = New-Object -ComObject WScript.Shell
   $message = "YouTube auth failed for $youtubeAccountEmail.`n`nRedo authentication now?"
@@ -311,6 +338,17 @@ try {
   }
 
   Set-AutomationState
+
+  if ((Get-Date).Hour -eq 16) {
+    $exitCode = Invoke-PdfOmniUpload -ResetLog
+    if ($exitCode -eq $authFailureExitCode) {
+      if (-not (Invoke-YouTubeAuthRecovery)) {
+        exit $authFailureExitCode
+      }
+      $exitCode = Invoke-PdfOmniUpload
+    }
+    exit $exitCode
+  }
 
   $attempt = 1
   $exitCode = Invoke-AutomationAttempt -Attempt $attempt -ResetLog
