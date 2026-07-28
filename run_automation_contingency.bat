@@ -13,7 +13,7 @@ echo [%date% %time%] Contingency retry attempt !ATTEMPT! of !MAX_ATTEMPTS! start
 set "SHOW_PRE_RENDER_ALERT=0"
 if !ATTEMPT! GEQ !MAX_ATTEMPTS! set "SHOW_PRE_RENDER_ALERT=1"
 
-powershell -NoProfile -Command "& { $env:VGEN_SHOW_PRE_RENDER_ALERT='!SHOW_PRE_RENDER_ALERT!'; $utf8 = New-Object System.Text.UTF8Encoding $false; [Console]::OutputEncoding = $utf8; Remove-Item 'automation.log' -Force -ErrorAction SilentlyContinue; python scripts/automate.py --contingency-retry 2>&1 | ForEach-Object { $line = $_.ToString(); Write-Host $line; $line | Out-File -FilePath 'automation.log' -Encoding utf8 -Append }; $code = $LASTEXITCODE; exit $code }"
+powershell -NoProfile -Command "& { $env:VGEN_SHOW_PRE_RENDER_ALERT='!SHOW_PRE_RENDER_ALERT!'; $utf8 = New-Object System.Text.UTF8Encoding $false; [Console]::OutputEncoding = $utf8; python scripts/automate.py --contingency-retry 2>&1 | ForEach-Object { $line = $_.ToString(); Write-Host $line; $line | Out-File -FilePath 'automation.log' -Encoding utf8 -Append }; $code = $LASTEXITCODE; exit $code }"
 set "EXIT_CODE=%ERRORLEVEL%"
 
 echo [%date% %time%] Contingency retry finished with exit code %EXIT_CODE%.

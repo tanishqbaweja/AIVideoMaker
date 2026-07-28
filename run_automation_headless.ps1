@@ -207,10 +207,14 @@ function Invoke-AutomationAttempt {
     [Parameter(Mandatory = $true)]
     [int]$Attempt,
 
-    [string[]]$PythonArguments = @()
+    [string[]]$PythonArguments = @(),
+
+    [switch]$ResetLog
   )
 
-  Write-HeadlessLog -Message "Headless automation attempt $Attempt of $maxAttempts starting." -Reset
+  Write-HeadlessLog `
+    -Message "Headless automation attempt $Attempt of $maxAttempts starting." `
+    -Reset:$ResetLog
 
   $fullArguments = @("scripts/automate.py") + $PythonArguments
   $env:VGEN_SHOW_PRE_RENDER_ALERT = if ($Attempt -ge $maxAttempts) { "1" } else { "0" }
@@ -309,7 +313,7 @@ try {
   Set-AutomationState
 
   $attempt = 1
-  $exitCode = Invoke-AutomationAttempt -Attempt $attempt
+  $exitCode = Invoke-AutomationAttempt -Attempt $attempt -ResetLog
 
   if ($exitCode -eq $authFailureExitCode) {
     if (-not (Invoke-YouTubeAuthRecovery)) {
