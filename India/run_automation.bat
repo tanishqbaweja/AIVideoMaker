@@ -4,7 +4,7 @@ setlocal
 cd /d "H:\Github Repositories\AIVideoMaker\India"
 echo [%date% %time%] Automation run starting...
 
-powershell -NoProfile -ExecutionPolicy Bypass -File "H:\Github Repositories\AIVideoMaker\India\run_automation_headless.ps1" -ShowProgress
+powershell -NoProfile -ExecutionPolicy Bypass -File "H:\Github Repositories\AIVideoMaker\India\run_automation_headless.ps1" -ShowProgress -SingleVideo
 set "EXIT_CODE=%ERRORLEVEL%"
 
 echo [%date% %time%] Automation run finished with exit code %EXIT_CODE%.

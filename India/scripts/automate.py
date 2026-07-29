@@ -61,6 +61,7 @@ EXIT_AUTH_FAILURE = 23
 EXIT_PUBLISH_FAILURE = 24
 PRE_RENDER_ALERT_ENV = "VGEN_SHOW_PRE_RENDER_ALERT"
 PUBLISH_AFTER_UPLOAD_ENV = "VGEN_RUN_PUBLISH_AFTER_UPLOAD"
+DESKTOP_ALERTS_ENV = "VGEN_SHOW_DESKTOP_ALERTS"
 PROJECT_LABEL = "India"
 
 TOPICS = [
@@ -131,6 +132,15 @@ def parse_args():
         "--contingency-retry",
         action="store_true",
         help="Marks this run as the one-shot contingency retry.",
+    )
+    parser.add_argument(
+        "--publish-at",
+        help="Upload as private and schedule publication at this ISO-8601 timestamp.",
+    )
+    parser.add_argument(
+        "--slot-label",
+        default="Generated video",
+        help="Human-readable batch slot label used in logs and notifications.",
     )
     return parser.parse_args()
 
@@ -475,26 +485,40 @@ def ensure_youtube_auth_ready():
     log("YouTube auth is ready.")
 
 
-def upload_to_youtube(video_path: str, title: str, description: str, tags_file: str) -> str:
+def upload_to_youtube(
+    video_path: str,
+    title: str,
+    description: str,
+    tags_file: str,
+    publish_at: str | None = None,
+) -> str:
     title = ensure_shorts(title)
     description = ensure_shorts(description)
+    privacy_status = "private" if publish_at else "unlisted"
 
-    log(f"Uploading to YouTube: {title}")
+    if publish_at:
+        log(f"Uploading to YouTube for scheduled publication at {publish_at}: {title}")
+    else:
+        log(f"Uploading to YouTube: {title}")
+    command = [
+        sys.executable,
+        os.path.join(PROJECT_ROOT, "upload.py"),
+        "--file",
+        video_path,
+        "--title",
+        title,
+        "--description",
+        description,
+        "--tags-file",
+        os.path.join(PROJECT_ROOT, tags_file),
+        "--privacy",
+        privacy_status,
+    ]
+    if publish_at:
+        command.extend(["--publish-at", publish_at])
+
     result = subprocess.run(
-        [
-            sys.executable,
-            os.path.join(PROJECT_ROOT, "upload.py"),
-            "--file",
-            video_path,
-            "--title",
-            title,
-            "--description",
-            description,
-            "--tags-file",
-            os.path.join(PROJECT_ROOT, tags_file),
-            "--privacy",
-            "unlisted",
-        ],
+        command,
         capture_output=True,
         text=True,
         cwd=PROJECT_ROOT,
@@ -518,6 +542,7 @@ def save_last_upload_state(
     topic_label: str,
     tags_file: str,
     privacy_status: str,
+    publish_at: str | None = None,
 ):
     record = {
         "videoId": video_id,
@@ -530,6 +555,8 @@ def save_last_upload_state(
         "uploadedAt": datetime.now().astimezone().isoformat(timespec="seconds"),
         "projectRoot": PROJECT_ROOT,
     }
+    if publish_at:
+        record["publishAt"] = publish_at
 
     with open(LAST_UPLOAD_STATE_PATH, "w", encoding="utf-8") as handle:
         json.dump(record, handle, indent=2, ensure_ascii=False)
@@ -537,12 +564,19 @@ def save_last_upload_state(
     log(f"Saved last upload metadata: {LAST_UPLOAD_STATE_PATH}")
 
 
-def send_discord_notification(topic_label: str, title: str, video_id: str):
+def send_discord_notification(
+    topic_label: str,
+    title: str,
+    video_id: str,
+    publish_at: str | None = None,
+):
     yt_url = f"https://youtube.com/shorts/{video_id}" if video_id else "Upload ID unknown"
+    schedule_line = f"Scheduled publish: {publish_at}\n" if publish_at else ""
     message = (
         f"V-GEN {PROJECT_LABEL} Upload Complete!\n"
         f"Title: {title}\n"
         f"Topic: {topic_label}\n"
+        f"{schedule_line}"
         f"{yt_url}"
     )
 
@@ -670,8 +704,22 @@ def should_show_pre_render_alert() -> bool:
     return os.environ.get(PRE_RENDER_ALERT_ENV, "1").strip() == "1"
 
 
-def run_automation(contingency_retry: bool) -> int:
-    run_label = "V-GEN Automation Contingency Retry" if contingency_retry else "V-GEN Automation Run"
+def should_show_desktop_alert() -> bool:
+    return os.environ.get(DESKTOP_ALERTS_ENV, "1").strip().lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+
+
+def run_automation(
+    contingency_retry: bool,
+    publish_at: str | None,
+    slot_label: str,
+) -> int:
+    run_kind = "Contingency Retry" if contingency_retry else "Run"
+    run_label = f"V-GEN {slot_label} {run_kind}"
     log("=" * 60)
     log(f"{run_label} Starting")
     log("=" * 60)
@@ -722,7 +770,14 @@ def run_automation(contingency_retry: bool) -> int:
         prune_final_videos()
 
         current_stage = "uploading to YouTube"
-        video_id = upload_to_youtube(final_video_path, yt_title, yt_desc, tags_file)
+        video_id = upload_to_youtube(
+            final_video_path,
+            yt_title,
+            yt_desc,
+            tags_file,
+            publish_at,
+        )
+        privacy_status = "private" if publish_at else "unlisted"
         save_last_upload_state(
             video_id=video_id,
             title=yt_title,
@@ -730,14 +785,18 @@ def run_automation(contingency_retry: bool) -> int:
             topic_id=topic_id,
             topic_label=topic_label,
             tags_file=tags_file,
-            privacy_status="unlisted",
+            privacy_status=privacy_status,
+            publish_at=publish_at,
         )
 
-        current_stage = "publishing uploaded YouTube video"
-        run_publish_after_upload()
+        if publish_at:
+            log(f"YouTube will publish this private video automatically at {publish_at}.")
+        else:
+            current_stage = "publishing uploaded YouTube video"
+            run_publish_after_upload()
 
         current_stage = "sending Discord notification"
-        send_discord_notification(topic_label, yt_title, video_id)
+        send_discord_notification(topic_label, yt_title, video_id, publish_at)
 
         log("=" * 60)
         log(f"{run_label} Complete")
@@ -794,7 +853,7 @@ def run_automation(contingency_retry: bool) -> int:
             stop_dev_server(dev_proc)
             cleanup_dev_server_port()
 
-    if alert_title and alert_message:
+    if alert_title and alert_message and should_show_desktop_alert():
         show_desktop_alert(
             alert_title,
             alert_message,
@@ -804,4 +863,10 @@ def run_automation(contingency_retry: bool) -> int:
 
 if __name__ == "__main__":
     cli_args = parse_args()
-    sys.exit(run_automation(cli_args.contingency_retry))
+    sys.exit(
+        run_automation(
+            cli_args.contingency_retry,
+            cli_args.publish_at,
+            cli_args.slot_label,
+        )
+    )

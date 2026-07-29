@@ -1,4 +1,4 @@
-"""Validate, select, and upload a rotating PDFomni video as a public Short."""
+"""Validate, select, and schedule a rotating PDFomni Short."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ import random
 import subprocess
 import sys
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterator
 
@@ -23,6 +23,7 @@ LAST_TWO_PATH = PDFOMNI_DIR / "last_2_uploads.json"
 LOCK_PATH = PDFOMNI_DIR / "upload.lock"
 LAST_UPLOAD_STATE_PATH = PROJECT_ROOT / "last_youtube_upload.json"
 VIDEO_NUMBERS = tuple(range(1, 8))
+IST = timezone(timedelta(hours=5, minutes=30))
 
 EXIT_SUCCESS = 0
 EXIT_VALIDATION_FAILURE = 2
@@ -41,7 +42,7 @@ def log(message: str) -> None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Upload one eligible PDFomni video as public."
+        description="Upload one eligible PDFomni video for scheduled publication."
     )
     parser.add_argument(
         "video_number",
@@ -55,7 +56,24 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Validate all seven MP4/JSON pairs without selecting or uploading.",
     )
+    parser.add_argument(
+        "--publish-at",
+        help="Future ISO-8601 publishing time. Defaults to the next 8:00 PM IST.",
+    )
     return parser.parse_args()
+
+
+def get_default_publish_at(now: datetime | None = None) -> str:
+    current_time = now.astimezone(IST) if now else datetime.now(IST)
+    publish_time = current_time.replace(
+        hour=20,
+        minute=0,
+        second=0,
+        microsecond=0,
+    )
+    if publish_time <= current_time:
+        publish_time += timedelta(days=1)
+    return youtube_upload.normalize_publish_at(publish_time.isoformat())
 
 
 def load_metadata(video_number: int) -> dict:
@@ -180,7 +198,7 @@ def write_json_atomic(path: Path, value: object) -> None:
     os.replace(temporary_path, path)
 
 
-def save_upload_state(metadata: dict, video_id: str) -> None:
+def save_upload_state(metadata: dict, video_id: str, publish_at: str) -> None:
     record = {
         "videoId": video_id,
         "title": metadata["title"],
@@ -188,7 +206,8 @@ def save_upload_state(metadata: dict, video_id: str) -> None:
         "topicId": "pdfomni",
         "topicLabel": "PDFomni",
         "tagsFile": metadata["metadataPath"],
-        "privacyStatus": "public",
+        "privacyStatus": "private",
+        "publishAt": publish_at,
         "uploadedAt": datetime.now().astimezone().isoformat(timespec="seconds"),
         "projectRoot": str(PROJECT_ROOT),
     }
@@ -196,11 +215,12 @@ def save_upload_state(metadata: dict, video_id: str) -> None:
     log(f"Saved last upload metadata: {LAST_UPLOAD_STATE_PATH}")
 
 
-def send_discord_notification(metadata: dict, video_id: str) -> None:
+def send_discord_notification(metadata: dict, video_id: str, publish_at: str) -> None:
     message = (
         "V-GEN Main PDFomni Upload Complete!\n"
         f"Title: {metadata['title']}\n"
         f"Source: pdfomni/{metadata['videoNumber']}.mp4\n"
+        f"Scheduled publish: {publish_at}\n"
         f"https://youtube.com/shorts/{video_id}"
     )
     result = subprocess.run(
@@ -262,8 +282,22 @@ def upload_lock() -> Iterator[None]:
         lock_handle.close()
 
 
-def run_upload(requested_number: int | None) -> int:
+def run_upload(requested_number: int | None, requested_publish_at: str | None) -> int:
     try:
+        youtube = youtube_upload.get_authenticated_service(
+            allow_interactive=False,
+            force_reauth=False,
+        )
+    except Exception as exc:
+        log(f"YouTube auth check failed: {exc}")
+        return EXIT_AUTH_FAILURE
+
+    try:
+        publish_at = (
+            youtube_upload.normalize_publish_at(requested_publish_at)
+            if requested_publish_at
+            else get_default_publish_at()
+        )
         metadata_by_number = validate_assets()
         last_seven = load_history(LAST_SEVEN_PATH, len(VIDEO_NUMBERS))
         last_two = load_history(LAST_TWO_PATH, 2)
@@ -279,23 +313,18 @@ def run_upload(requested_number: int | None) -> int:
         return EXIT_VALIDATION_FAILURE
 
     try:
-        youtube = youtube_upload.get_authenticated_service(
-            allow_interactive=False,
-            force_reauth=False,
+        log(
+            f"Uploading PDFomni video {selected_number} for publication at "
+            f"{publish_at}: {metadata['title']}"
         )
-    except Exception as exc:
-        log(f"YouTube auth check failed: {exc}")
-        return EXIT_AUTH_FAILURE
-
-    try:
-        log(f"Uploading PDFomni video {selected_number} as public: {metadata['title']}")
         video_id = youtube_upload.upload_video(
             youtube,
             metadata["videoPath"],
             metadata["title"],
             metadata["description"],
             metadata["tags"],
-            "public",
+            "private",
+            publish_at,
         )
     except googleapiclient.errors.HttpError as exc:
         log(f"YouTube upload failed with HTTP {exc.resp.status}: {exc.content}")
@@ -308,17 +337,20 @@ def run_upload(requested_number: int | None) -> int:
     updated_recent = (last_two + [selected_number])[-2:]
     write_json_atomic(LAST_SEVEN_PATH, updated_cycle)
     write_json_atomic(LAST_TWO_PATH, updated_recent)
-    save_upload_state(metadata, video_id)
+    save_upload_state(metadata, video_id, publish_at)
     log(f"Updated seven-video cycle: {updated_cycle}")
     log(f"Updated last-two uploads: {updated_recent}")
 
     try:
-        send_discord_notification(metadata, video_id)
+        send_discord_notification(metadata, video_id, publish_at)
     except Exception as exc:
         log(f"Discord notification failed after successful upload: {exc}")
         return EXIT_DISCORD_FAILURE
 
-    log(f"PDFomni public upload complete: https://youtube.com/shorts/{video_id}")
+    log(
+        f"PDFomni upload scheduled for {publish_at}: "
+        f"https://youtube.com/shorts/{video_id}"
+    )
     return EXIT_SUCCESS
 
 
@@ -330,7 +362,7 @@ def main() -> int:
                 validate_assets()
                 log("All seven PDFomni assets are valid. No upload was attempted.")
                 return EXIT_SUCCESS
-            return run_upload(args.video_number)
+            return run_upload(args.video_number, args.publish_at)
     except RuntimeError as exc:
         log(str(exc))
         return EXIT_UPLOAD_FAILURE
