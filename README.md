@@ -114,9 +114,13 @@ The repository includes a fully-automated workflow that handles everything from 
    ```powershell
    python upload.py --file "path/to/any.mp4" --title "Test" --description "Test" --tags-file "tags/obscure_facts_engine.txt"
    ```
-2. **Execute**: Run `run_automation.bat` for a visible console run, or use `run_automation_headless.vbs` for the hidden/background path. `run_automation_headless.vbs` defaults to hidden mode. Launch it with `show` to attach a visible live progress view to the current hidden run (or start a visible run if none is active), and launch it with `stop` to terminate the currently running headless automation.
+2. **Execute**: Run `run_automation.bat` for one visible, immediate generated-video run. Task Scheduler should run `run_automation_headless.vbs` once per day before 8:00 PM IST. The main hidden batch publishes one generated video immediately, schedules one rotating PDFomni video for 8:00 PM IST, then creates and schedules a second generated video for 4:00 AM IST the next day. The India hidden batch publishes one generated video immediately, then creates and schedules a second generated video for 9:00 PM IST the same day.
 
-After a successful upload, automation runs the project-local `publish.bat` before sending Discord. `VGEN_RUN_PUBLISH_AFTER_UPLOAD` defaults to `true`; set it to `false` in the launching process, user environment, or machine environment to leave uploads unlisted. The VBS path runs publishing in the same hidden process tree.
+Each generated-video slot has its own independent allowance of 10 attempts. Slot 2 starts only after slot 1 has been uploaded successfully; in the main batch, the PDFomni upload also completes before slot 2 starts. A failed slot displays its identity in the desktop error message and leaves the complete output in `automation.log`.
+
+Immediate uploads run the project-local `publish.bat` before sending Discord. Scheduled uploads are inserted as private with YouTube's `publishAt` field and become public automatically. `VGEN_RUN_PUBLISH_AFTER_UPLOAD` defaults to `true`; setting it to `false` still leaves manually generated immediate uploads unlisted.
+
+Run `upload_pdf_video.bat` to manually schedule the next eligible PDFomni rotation video for the next 8:00 PM IST using the same authentication recovery flow. Run `python scripts/upload_pdf_video.py --validate-only` to validate all assets without uploading.
 
 Enter a generation prompt, choose the vibe and aspect ratio, then click `COMPILE VIDEO`.
 

@@ -1,6 +1,7 @@
 param(
   [switch]$ShowProgress,
-  [switch]$StopActiveRun
+  [switch]$StopActiveRun,
+  [switch]$SingleVideo
 )
 
 $ErrorActionPreference = "Stop"
@@ -11,6 +12,7 @@ $automationStatePath = Join-Path $repoDir "automation_state.json"
 $maxAttempts = 10
 $authFailureExitCode = 23
 $youtubeAccountEmail = "firstlast339@gmail.com"
+$projectLabel = "India"
 if ([string]::IsNullOrWhiteSpace($env:VGEN_RUN_PUBLISH_AFTER_UPLOAD)) {
   $env:VGEN_RUN_PUBLISH_AFTER_UPLOAD = "true"
 }
@@ -207,17 +209,18 @@ function Invoke-AutomationAttempt {
     [Parameter(Mandatory = $true)]
     [int]$Attempt,
 
-    [string[]]$PythonArguments = @(),
+    [Parameter(Mandatory = $true)]
+    [string]$SlotLabel,
 
-    [switch]$ResetLog
+    [string[]]$PythonArguments = @()
   )
 
   Write-HeadlessLog `
-    -Message "Headless automation attempt $Attempt of $maxAttempts starting." `
-    -Reset:$ResetLog
+    -Message "$SlotLabel generation attempt $Attempt of $maxAttempts starting."
 
   $fullArguments = @("scripts/automate.py") + $PythonArguments
-  $env:VGEN_SHOW_PRE_RENDER_ALERT = if ($Attempt -ge $maxAttempts) { "1" } else { "0" }
+  $env:VGEN_SHOW_PRE_RENDER_ALERT = "0"
+  $env:VGEN_SHOW_DESKTOP_ALERTS = "0"
   $quotedArguments = $fullArguments | ForEach-Object {
     '"' + ($_.Replace('"', '\"')) + '"'
   }
@@ -236,8 +239,130 @@ function Invoke-AutomationAttempt {
   }
 
   $exitCode = $LASTEXITCODE
-  Write-HeadlessLog -Message "Headless automation attempt $Attempt finished with exit code $exitCode."
+  Write-HeadlessLog -Message "$SlotLabel attempt $Attempt finished with exit code $exitCode."
   return $exitCode
+}
+
+function Invoke-YouTubeAuthCheck {
+  Write-HeadlessLog -Message "Checking YouTube authentication before starting the daily batch."
+  $authOutput = & cmd.exe /d /c "python upload.py --check-auth 2>&1"
+  $authExitCode = $LASTEXITCODE
+  $authOutput | ForEach-Object {
+    if ($ShowProgress) {
+      Write-Host $_.ToString()
+    }
+    [System.IO.File]::AppendAllText(
+      $automationLogPath,
+      $_.ToString() + [Environment]::NewLine,
+      $utf8NoBom
+    )
+  }
+  if ($authExitCode -eq 0) {
+    Write-HeadlessLog -Message "YouTube authentication is ready."
+    return 0
+  }
+  Write-HeadlessLog -Message "YouTube authentication check failed with exit code $authExitCode."
+  return $authFailureExitCode
+}
+
+function Show-SlotFailure {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$SlotLabel,
+
+    [Parameter(Mandatory = $true)]
+    [string]$Detail
+  )
+
+  Write-HeadlessLog -Message "$SlotLabel failed: $Detail"
+  $popup = New-Object -ComObject WScript.Shell
+  $message = "$SlotLabel failed.`n`n$Detail`n`nCheck automation.log for the complete output."
+  $popup.Popup(
+    $message,
+    0,
+    "V-GEN $projectLabel Daily Batch Failure",
+    0 + 16 + 4096
+  ) | Out-Null
+}
+
+function Get-IstPublishAt {
+  param(
+    [Parameter(Mandatory = $true)]
+    [int]$Hour,
+
+    [Parameter(Mandatory = $true)]
+    [int]$DayOffset,
+
+    [Parameter(Mandatory = $true)]
+    [string]$Label
+  )
+
+  $ist = [System.TimeZoneInfo]::FindSystemTimeZoneById("India Standard Time")
+  $nowUtc = [DateTime]::UtcNow
+  $nowIst = [System.TimeZoneInfo]::ConvertTimeFromUtc($nowUtc, $ist)
+  $localTarget = [DateTime]::SpecifyKind(
+    $nowIst.Date.AddDays($DayOffset).AddHours($Hour),
+    [DateTimeKind]::Unspecified
+  )
+  $targetUtc = [System.TimeZoneInfo]::ConvertTimeToUtc($localTarget, $ist)
+  if ($targetUtc -le $nowUtc) {
+    throw "$Label has already passed. Run the daily batch earlier in the day."
+  }
+  return $targetUtc.ToString("yyyy-MM-ddTHH:mm:ssZ")
+}
+
+function Invoke-GenerationSlot {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$SlotLabel,
+
+    [string]$PublishAt
+  )
+
+  for ($attempt = 1; $attempt -le $maxAttempts; $attempt += 1) {
+    $pythonArguments = @("--slot-label", $SlotLabel)
+    if (-not [string]::IsNullOrWhiteSpace($PublishAt)) {
+      $pythonArguments += @("--publish-at", $PublishAt)
+    }
+    if ($attempt -gt 1) {
+      $pythonArguments += "--contingency-retry"
+    }
+
+    $exitCode = Invoke-AutomationAttempt `
+      -Attempt $attempt `
+      -SlotLabel $SlotLabel `
+      -PythonArguments $pythonArguments
+
+    if ($exitCode -eq 0) {
+      Write-HeadlessLog -Message "$SlotLabel completed successfully."
+      return 0
+    }
+
+    if ($exitCode -eq $authFailureExitCode) {
+      if (Invoke-YouTubeAuthRecovery) {
+        $attempt -= 1
+        continue
+      }
+      Show-SlotFailure -SlotLabel $SlotLabel -Detail "YouTube authentication could not be restored."
+      return $authFailureExitCode
+    }
+
+    if ($exitCode -ne 10) {
+      Show-SlotFailure -SlotLabel $SlotLabel -Detail "The slot exited with code $exitCode."
+      return $exitCode
+    }
+
+    if ($attempt -eq $maxAttempts) {
+      Show-SlotFailure `
+        -SlotLabel $SlotLabel `
+        -Detail "Video generation failed after all $maxAttempts independent attempts."
+      return 10
+    }
+
+    Write-HeadlessLog -Message "$SlotLabel will retry after pre-video generation failure."
+  }
+
+  return 10
 }
 
 function Invoke-YouTubeAuthRecovery {
@@ -288,7 +413,7 @@ exit `$code
     return $false
   }
 
-  Write-HeadlessLog -Message "YouTube reauthentication succeeded. Restarting the automation pipeline."
+  Write-HeadlessLog -Message "YouTube reauthentication succeeded. Resuming the daily batch."
   return $true
 }
 
@@ -311,32 +436,48 @@ try {
   }
 
   Set-AutomationState
+  Write-HeadlessLog -Message "V-GEN $projectLabel automation starting." -Reset
 
-  $attempt = 1
-  $exitCode = Invoke-AutomationAttempt -Attempt $attempt -ResetLog
-
-  if ($exitCode -eq $authFailureExitCode) {
+  $authExitCode = Invoke-YouTubeAuthCheck
+  if ($authExitCode -ne 0) {
     if (-not (Invoke-YouTubeAuthRecovery)) {
       exit $authFailureExitCode
     }
-    $attempt = 1
-    $exitCode = Invoke-AutomationAttempt -Attempt $attempt
+    $authExitCode = Invoke-YouTubeAuthCheck
+    if ($authExitCode -ne 0) {
+      exit $authFailureExitCode
+    }
   }
 
-  while ($exitCode -eq 10 -and $attempt -lt $maxAttempts) {
-    $attempt += 1
-    $exitCode = Invoke-AutomationAttempt -Attempt $attempt -PythonArguments @("--contingency-retry")
+  if ($SingleVideo) {
+    $exitCode = Invoke-GenerationSlot -SlotLabel "Manual immediate video"
+    exit $exitCode
   }
 
-  if ($exitCode -eq 10 -and $attempt -ge $maxAttempts) {
-    Write-HeadlessLog -Message "Pre-video failure limit reached after $maxAttempts attempts."
-    exit 10
+  $env:VGEN_RUN_PUBLISH_AFTER_UPLOAD = "true"
+  $secondVideoPublishAt = Get-IstPublishAt `
+    -Hour 21 `
+    -DayOffset 0 `
+    -Label "The 9:00 PM IST generated-video publishing slot"
+
+  $exitCode = Invoke-GenerationSlot -SlotLabel "India video 1 (immediate)"
+  if ($exitCode -ne 0) {
+    exit $exitCode
   }
 
+  $exitCode = Invoke-GenerationSlot `
+    -SlotLabel "India video 2 (scheduled 9:00 PM IST)" `
+    -PublishAt $secondVideoPublishAt
+  if ($exitCode -ne 0) {
+    exit $exitCode
+  }
+
+  Write-HeadlessLog -Message "V-GEN India daily batch completed successfully."
   exit $exitCode
 } catch {
   Write-HeadlessLog -Message ("Headless wrapper failure: " + $_.Exception.Message)
-  throw
+  Show-SlotFailure -SlotLabel "India daily batch setup" -Detail $_.Exception.Message
+  exit 1
 } finally {
   if ($hasMutex) {
     Clear-AutomationState

@@ -72,13 +72,13 @@ After the final video is successfully saved to the `Final_Video/` folder, the en
 *   This file acts as a circular buffer limited to 10 entries. When the 11th video is generated, the oldest fact in the buffer is deleted. This feeds into Step 1 to guarantee eternal content freshness.
 
 ### Step 7: Automation, Upload, and Notification (`scripts/automate.py`)
-The pipeline is designed to be completely hands-off. A master Python orchestrator script (`scripts/automate.py`) is triggered by the Windows Task Scheduler twice a day.
+The pipeline is designed to be completely hands-off. Windows Task Scheduler launches the project VBS once per day, and the PowerShell wrapper runs each video slot sequentially.
 
-1.  **Topic Selection**: The script randomly selects one of the 10 Quick Topics.
-2.  **Dev Server Management**: It checks if the Next.js dev server is running. If not, it spawns it as a subprocess and polls (`/`) for up to 90 seconds until ready.
-3.  **Job Submission**: It submits a POST request to `/api/generate` with the chosen topic and a `9:16` aspect ratio, then polls the status until completion.
-4.  **Metadata Extraction**: When the video is rendered, it extracts the CTR-optimized `youtubeTitle` and `youtubeDescription` that Gemini generated during Step 1. The script ensures `#shorts` is present in both.
-5.  **YouTube Upload (`upload.py`)**: The script calls `upload.py`, passing the final MP4, title, description, and the topic's specific tag file (e.g., `tags/obscure_facts_engine.txt`). `upload.py` authenticates via a local `token.json` (OAuth2), uploads the video as unlisted, and prints the final YouTube Video ID to stdout.
-6.  **Conditional Publish (`publish.bat`)**: After the upload record is saved, the orchestrator runs the project-local publish BAT when `VGEN_RUN_PUBLISH_AFTER_UPLOAD` is true or unset. Setting it to false leaves the upload unlisted. Publishing inherits hidden VBS execution or visible BAT execution.
-7.  **Discord Notification (`scripts/notify_discord.py`)**: Once upload and optional publishing succeed, the Python orchestrator sends the project name, title, topic, and final YouTube link through the existing Discord bot.
-8.  **Cleanup**: The orchestrator shuts down the Next.js dev server if it started it.
+1.  **Preflight Authentication**: Before generation begins, the wrapper checks the project's YouTube OAuth token. The existing yes/no reauthentication flow runs if the check fails.
+2.  **Independent Slots**: Every generated-video slot receives up to 10 attempts. The counter resets for the next slot, and later slots never begin before earlier uploads complete.
+3.  **Main Schedule**: The main project publishes generated video 1 immediately, schedules a rotating PDFomni upload for 8:00 PM IST, then schedules generated video 2 for 4:00 AM IST the next day.
+4.  **India Schedule**: The India project publishes generated video 1 immediately, then schedules generated video 2 for 9:00 PM IST the same day. India never uses the PDFomni uploader.
+5.  **Generation**: For each slot, the orchestrator selects a topic, manages the Next.js dev server, submits a `9:16` generation job, waits for rendering, and extracts the generated YouTube metadata.
+6.  **YouTube Upload (`upload.py`)**: Immediate videos upload as unlisted and pass through `publish.bat`. Scheduled videos upload as private with a future ISO-8601 `status.publishAt`, allowing YouTube to publish them automatically.
+7.  **Failure Reporting**: Pre-video failures retry only the current slot. After attempt 10, the wrapper displays a desktop error naming the failed project/video slot; post-render upload or notification errors also identify the slot and stop the batch.
+8.  **Discord and Cleanup**: Every successful upload sends its title, link, and scheduled time when applicable, then its dev server is shut down before the next slot starts.

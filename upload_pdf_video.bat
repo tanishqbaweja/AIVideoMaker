@@ -2,9 +2,10 @@
 setlocal
 
 cd /d "H:\Github Repositories\AIVideoMaker"
-set "PYTHONIOENCODING=utf-8"
+echo [%date% %time%] PDFomni upload starting...
 
-python scripts\upload_pdf_video.py %*
+powershell -NoProfile -ExecutionPolicy Bypass -File "H:\Github Repositories\AIVideoMaker\run_automation_headless.ps1" -ShowProgress -PdfOnly
 set "EXIT_CODE=%ERRORLEVEL%"
 
+echo [%date% %time%] PDFomni upload finished with exit code %EXIT_CODE%.
 exit /b %EXIT_CODE%

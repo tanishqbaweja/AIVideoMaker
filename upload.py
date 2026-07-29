@@ -2,7 +2,7 @@
 YouTube Video Upload Script (CLI)
 
 Usage:
-    python upload.py --file VIDEO_PATH --title TITLE --description DESC --tags-file TAGS_PATH [--privacy private|public|unlisted]
+    python upload.py --file VIDEO_PATH --title TITLE --description DESC --tags-file TAGS_PATH [--privacy private|public|unlisted] [--publish-at ISO_TIME]
     python upload.py --check-auth
     python upload.py --reauth --check-auth
 
@@ -17,7 +17,7 @@ import sys
 import time
 import webbrowser
 import wsgiref.simple_server
-from datetime import datetime
+from datetime import datetime, timezone
 from urllib.parse import parse_qs
 
 import google_auth_oauthlib.flow
@@ -212,7 +212,47 @@ def load_tags(tags_file_path: str) -> list[str]:
     return [tag.strip() for tag in raw.split(",") if tag.strip()]
 
 
-def upload_video(youtube, file_path, title, description, tags, privacy):
+def normalize_publish_at(value: str) -> str:
+    normalized_value = value.strip()
+    if normalized_value.endswith("Z"):
+        normalized_value = normalized_value[:-1] + "+00:00"
+    try:
+        publish_at = datetime.fromisoformat(normalized_value)
+    except ValueError as exc:
+        raise ValueError(
+            "--publish-at must be an ISO-8601 timestamp with a timezone."
+        ) from exc
+    if publish_at.tzinfo is None:
+        raise ValueError("--publish-at must include a timezone offset.")
+    if publish_at <= datetime.now(timezone.utc):
+        raise ValueError("--publish-at must be in the future.")
+    return publish_at.astimezone(timezone.utc).isoformat(timespec="seconds").replace(
+        "+00:00",
+        "Z",
+    )
+
+
+def upload_video(
+    youtube,
+    file_path,
+    title,
+    description,
+    tags,
+    privacy,
+    publish_at=None,
+):
+    if publish_at:
+        if privacy != "private":
+            raise ValueError("Scheduled uploads must use private privacy status.")
+        publish_at = normalize_publish_at(publish_at)
+
+    status_body = {
+        "privacyStatus": privacy,
+        "selfDeclaredMadeForKids": False,
+    }
+    if publish_at:
+        status_body["publishAt"] = publish_at
+
     body = {
         "snippet": {
             "title": title,
@@ -220,10 +260,7 @@ def upload_video(youtube, file_path, title, description, tags, privacy):
             "tags": tags,
             "categoryId": "24",
         },
-        "status": {
-            "privacyStatus": privacy,
-            "selfDeclaredMadeForKids": False,
-        },
+        "status": status_body,
     }
 
     media = MediaFileUpload(file_path, chunksize=-1, resumable=True)
@@ -310,6 +347,10 @@ def parse_args():
         help="Privacy status.",
     )
     parser.add_argument(
+        "--publish-at",
+        help="Future ISO-8601 publishing time. Requires --privacy private.",
+    )
+    parser.add_argument(
         "--check-auth",
         action="store_true",
         help="Validate OAuth/token readiness without uploading a video.",
@@ -330,6 +371,10 @@ def validate_upload_args(args):
 
     if not os.path.exists(args.file):
         raise FileNotFoundError(f"Video file not found: {args.file}")
+    if args.publish_at and args.privacy != "private":
+        raise ValueError("--publish-at requires --privacy private.")
+    if args.publish_at:
+        args.publish_at = normalize_publish_at(args.publish_at)
 
 
 def main():
@@ -366,7 +411,15 @@ def main():
         title = ensure_shorts_tag(args.title)
         description = append_pdf_toolkit_description(ensure_shorts_tag(args.description))
         tags = load_tags(args.tags_file)
-        upload_video(youtube, args.file, title, description, tags, args.privacy)
+        upload_video(
+            youtube,
+            args.file,
+            title,
+            description,
+            tags,
+            args.privacy,
+            args.publish_at,
+        )
     except googleapiclient.errors.HttpError as exc:
         print(f"HTTP error: {exc.resp.status} {exc.content}", file=sys.stderr)
         sys.exit(1)
